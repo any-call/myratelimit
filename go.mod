@@ -1,4 +1,4 @@
-module github.com/any-call/myrabbitmq
+module github.com/any-call/myratelimit
 
 go 1.24.2
 
