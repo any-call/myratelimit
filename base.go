@@ -1,11 +1,14 @@
 package myratelimit
 
 import (
-	"github.com/juju/ratelimit"
 	"io"
 	"net"
 	"sync"
+
+	"github.com/juju/ratelimit"
 )
+
+const maxBucketWaitBytes int64 = 256 * 1024
 
 // RateLimitedConn 封装后的限速器，实现 io.ReadWriter 接口
 type RateLimitedConn struct {
@@ -21,36 +24,50 @@ type RateLimitedConn struct {
 
 // Read 调用限速后的 reader
 func (r *RateLimitedConn) Read(p []byte) (int, error) {
-	if r.readBucket != nil {
-		n := int(r.readBucket.Take(int64(len(p))))
-		if n <= 0 {
-			r.readBucket.Wait(int64(len(p)))
-			n = len(p)
-		}
-		return r.reader.Read(p[:n])
-	}
-	return r.reader.Read(p)
+	n, err := r.reader.Read(p)
+	waitBucket(r.readBucket, int64(n))
+	return n, err
 }
 
 // Write 调用限速后的 writer
 func (r *RateLimitedConn) Write(p []byte) (int, error) {
-	if r.writeBucket != nil {
-		total := 0
-		for total < len(p) {
-			n := int(r.writeBucket.Take(int64(len(p) - total)))
-			if n <= 0 {
-				r.writeBucket.Wait(int64(len(p) - total))
-				n = len(p) - total
-			}
-			w, err := r.writer.Write(p[total : total+n])
-			total += w
-			if err != nil {
-				return total, err
-			}
+	waitBucket(r.writeBucket, int64(len(p)))
+
+	total := 0
+	for total < len(p) {
+		n, err := r.writer.Write(p[total:])
+		total += n
+		if err != nil {
+			return total, err
 		}
-		return total, nil
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
 	}
-	return r.writer.Write(p)
+	return total, nil
+}
+
+func waitBucket(bucket *ratelimit.Bucket, count int64) {
+	if bucket == nil || count <= 0 {
+		return
+	}
+
+	chunkSize := bucket.Capacity()
+	if chunkSize <= 0 {
+		return
+	}
+	if chunkSize > maxBucketWaitBytes {
+		chunkSize = maxBucketWaitBytes
+	}
+
+	for remaining := count; remaining > 0; {
+		chunk := remaining
+		if chunk > chunkSize {
+			chunk = chunkSize
+		}
+		bucket.Wait(chunk)
+		remaining -= chunk
+	}
 }
 
 // ---------------- 零拷贝优化 (仅当 underlying 是 net.Conn) ----------------
@@ -150,7 +167,11 @@ func WrapWithRateLimit(rw io.ReadWriter, readLimit, writeLimit int64) io.ReadWri
 
 func bucketFromLimit(limit int64) *ratelimit.Bucket {
 	if limit > 0 {
-		return ratelimit.NewBucketWithRate(float64(limit), limit)
+		capacity := limit
+		if capacity < maxBucketWaitBytes {
+			capacity = maxBucketWaitBytes
+		}
+		return ratelimit.NewBucketWithRate(float64(limit), capacity)
 	}
 	return nil
 }

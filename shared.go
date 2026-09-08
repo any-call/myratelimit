@@ -11,8 +11,6 @@ import (
 const (
 	DirectionUpload Direction = iota + 1
 	DirectionDownload
-
-	maxSharedBucketWaitBytes int64 = 256 * 1024
 )
 
 type Direction int
@@ -170,19 +168,7 @@ func (l *SharedLimiter) wait(direction Direction, n int) {
 	if n <= 0 {
 		return
 	}
-
-	bucket := l.bucket(direction)
-	if bucket == nil {
-		return
-	}
-	for remaining := int64(n); remaining > 0; {
-		waitBytes := remaining
-		if waitBytes > maxSharedBucketWaitBytes {
-			waitBytes = maxSharedBucketWaitBytes
-		}
-		bucket.Wait(waitBytes)
-		remaining -= waitBytes
-	}
+	waitBucket(l.bucket(direction), int64(n))
 }
 
 func (l *SharedLimiter) bucket(direction Direction) *ratelimit.Bucket {
@@ -203,8 +189,8 @@ func newSharedBucket(bytesSec int64) *ratelimit.Bucket {
 		return nil
 	}
 	burst := bytesSec
-	if burst < maxSharedBucketWaitBytes {
-		burst = maxSharedBucketWaitBytes
+	if burst < maxBucketWaitBytes {
+		burst = maxBucketWaitBytes
 	}
 	return ratelimit.NewBucketWithRate(float64(bytesSec), burst)
 }
